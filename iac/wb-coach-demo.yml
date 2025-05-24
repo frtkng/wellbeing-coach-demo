@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimum Wellbeing Chat Demo (Web + Lambda + API)
+Parameters:
+  Env:
+    Type: String
+    Default: demo
+
+  DeployTime:
+    Type: String
+    Default: "" 
+
+Resources:
+  # 1) 静的サイトバケット
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub wb-${Env}-site-${AWS::AccountId}
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicRead
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+
+  # 2) Lambda ロール
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # 3) Chat Lambda
+  ChatLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub wb-${Env}-chat
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 256
+      Timeout: 15
+      #Layers:
+      #  - arn:aws:lambda:ap-northeast-1:676206918971:layer:openai-py311:1
+      Environment:
+        Variables:
+           OPENAI_KEY: "{{resolve:secretsmanager:demo/openai:SecretString:::}}"
+      Code:
+        S3Bucket: !Sub wb-${Env}-site-${AWS::AccountId}
+        S3Key:    chat-bundle.zip          
+
+  # 4) API Gateway (REST)
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub wb-${Env}-api
+
+  ChatRes:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: chat
+
+  PostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref ChatRes
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ChatLambda.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref ChatRes
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{ "statusCode": 200 }'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin:  "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PostMethod
+      - OptionsMethod
+    Properties:
+      RestApiId: !Ref Api
+      StageName: prod
+      Description: !Sub "Deployed at ${AWS::StackName}-${DeployTime}"
+
+  Perm:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ChatLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/chat
+
+Outputs:
+  WebURL:
+    Value: !Sub http://${SiteBucket}.s3-website-${AWS::Region}.amazonaws.com
+  ChatAPI:
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com/prod/chat
