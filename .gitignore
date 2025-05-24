@@ -1,0 +1,10 @@
+# Virtual environment
+venv/
+.venv/
+
+# Local env files
+.env
+
+# IDE/editor settings
+.vscode/
+.idea/
