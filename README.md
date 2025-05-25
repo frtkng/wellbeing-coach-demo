@@ -2,30 +2,32 @@
 
 最小限の構成で ChatGPT ベースの Wellbeing コーチを試せるサーバーレスデモです。
 
-静的 Web UI + AWS Lambda (Python 標準ライブラリ利用) + API Gateway + Secrets Manager だけで動作します。
+* **Web UI**：静的サイト (HTML/CSS/JS)
+* **API**：AWS Lambda + API Gateway
+* **デプロイ**：CloudFormation テンプレート & シェルスクリプト
+* **シークレット**：AWS Secrets Manager
 
 ---
 
 ## 🎯 目的
 
-* Web ブラウザ上で気軽に質問→ChatGPT 応答を実現
-* 完全サーバレス（S3 + Lambda + API Gateway）
-* 外部ライブラリに依存しないシンプルなコード構成
+* ブラウザでマルチターン対話 (Web版ChatGPT風) を実現
+* 追加ライブラリ不要のシンプル Lambda コード
+* 1 スクリプトでインフラ＆コードを自動デプロイ
 
 ---
 
 ## 🔧 前提条件
 
-1. **AWS アカウント** 取得済（必要な IAM 権限: CloudFormation, S3, Lambda, API Gateway, SecretsManager）
-2. **AWS CLI v2** インストール・設定済 (`aws configure` で Access Key / Secret Key / region=ap-northeast-1 / output=json)
-3. **OpenAI API キー** を取得
+1. AWS アカウント (CloudFormation, S3, Lambda, API Gateway, SecretsManager 権限)
+2. AWS CLI v2 インストール・`aws configure` 済 (region=ap-northeast-1)
+3. OpenAI API キー取得
 
    * [https://platform.openai.com](https://platform.openai.com) → API Keys → "Create new secret key"
-   * 表示された `sk-...` を控える
 
 ---
 
-## 🔐 OpenAI キーを Secrets Manager に登録
+## 🔐 OpenAI キー登録
 
 ```bash
 aws secretsmanager create-secret \
@@ -34,156 +36,213 @@ aws secretsmanager create-secret \
   --secret-string sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
-* 成功すると ARN が返ります（以降は名前 `demo/openai` で参照）
-
 ---
 
 ## 📁 リポジトリ構成
 
-```bash
-town wellbeing-demo/
-├─ README.md              # このファイル
-├─ iac/                   # CloudFormation テンプレート
-│   └─ demo-wellbeing.yml
-├─ web/                   # 静的 Web UI
-│   ├─ index.html
-│   └─ main.js
-└─ scripts/               # デプロイ補助スクリプト
-    ├─ deploy.sh          # CloudFormation デプロイ
-    ├─ upload_web.sh      # Web UI を S3 へ sync
-    └─ delete_stack.sh    # スタック削除
+```
+wellbeing-coach-demo/
+├─ README.md               # このファイル
+├─ iac/
+│   └─ wb-coach-demo.yml   # CloudFormation テンプレート
+├─ web/
+│   ├─ index.html          # チャット UI
+│   └─ main.js             # multi-turn 対応 JS
+└─ scripts/
+    ├─ deploy.sh           # CloudFormation デプロイ + .env 出力
+    └─ upload_web.sh       # S3 同期 (index.html + main.js)
 ```
 
 ---
 
 ## 🚀 デプロイ手順
 
-1. **スクリプトに実行権を付与**
+1. **スクリプトに実行権** を付与
 
    ```bash
    chmod +x scripts/*.sh
    ```
-
-2. **CloudFormation をデプロイ**
+2. **CloudFormation デプロイ**
 
    ```bash
    ./scripts/deploy.sh
    ```
 
-   * 完了後、自動で `.env` が生成・更新されます。
-   * `.env` 内の `WEB_URL`, `API_URL` を利用します。
-
+   * `.env` が生成され、環境変数 `WEB_URL` と `API_URL` が書き込まれます
 3. **Web UI をアップロード**
 
    ```bash
    ./scripts/upload_web.sh
    ```
-
-4. **動作確認**
+4. **ブラウザでアクセス**
 
    ```bash
    source .env
    open $WEB_URL
    ```
 
-   * メッセージ欄にテキストを入力すると、ChatGPT の応答が返ります。
+   * メッセージ入力欄で Enter または「送信」を押下すると対話開始
 
 ---
 
-## 🗂️ CloudFormation テンプレート概要 (iac/demo-wellbeing.yml)
+## 🗂️ CloudFormation テンプレート
 
-* **静的サイトバケット (S3)**
-
-  * ホスティング用バケット + パブリック読み取りポリシー
-
-* **Lambda Role**
-
-  * 基本実行権限のみ（CloudWatch Logs 出力）
-
-* **ChatLambda**
-
-  * Python 3.11 ランタイム
-  * Handler: `index.lambda_handler` (標準ライブラリのみ)
-  * 環境変数 `OPENAI_KEY` を Secrets Manager (`demo/openai`) から参照
-  * コードはインラインではなく S3 バンドルを利用
-
-* **API Gateway**
-
-  * `POST /chat` (AWS\_PROXY)
-  * `OPTIONS /chat` (CORS 用 MOCK)
-
-* **Outputs**
-
-  * `WebURL` (S3 Website URL)
-  * `ChatAPI` (API Gateway エンドポイント)
+* **S3**: 静的サイトホスティングバケット
+* **Secrets Manager**: `/demo/openai` に登録した OpenAI キー
+* **Lambda** (`ChatLambda`): inline `ZipFile` で標準ライブラリのみのコード
+* **API Gateway**: `POST /chat` + `OPTIONS /chat` (CORS)
+* **Outputs**: `WebURL`, `ChatAPI`
 
 ---
 
-## 💡 Lambda コードサンプル
+## 💡 Lambda コード (inline)
 
-```python
-import os, json, urllib.request
-
-def lambda_handler(event, context):
-    body = json.loads(event.get("body","{}"))
-    msg = body.get("message", "")
-    system = "あなたは優しい健康コーチです。80文字以内の日本語で答えて。"
-
-    payload = json.dumps({
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": msg}
-        ]
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.environ['OPENAI_KEY']}"
-        }
-    )
-
-    with urllib.request.urlopen(req, timeout=10) as res:
-        result = json.loads(res.read().decode())
-
-    reply = result["choices"][0]["message"]["content"]
-
-    return {
-        "statusCode": 200,
-        "headers": {"Access-Control-Allow-Origin": "*"},
-        "body": json.dumps({"reply": reply})
-    }
+```yaml
+# iac/wb-coach-demo.yml 内の ChatLambda Code 部分
+Code:
+  ZipFile: |
+    import os, json, urllib.request, urllib.error
+    def lambda_handler(event, context):
+        body = json.loads(event.get("body","{}"))
+        messages = body.get("messages", [])
+        if not messages:
+            messages = [{"role":"system","content":"あなたは優しい健康コーチです。80文字以内の日本語で答えて。"}]
+        payload = json.dumps({"model":"gpt-4o-mini","messages":messages}).encode()
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type":"application/json",
+                "Authorization":f"Bearer {os.environ['OPENAI_KEY']}"
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as res:
+                result = json.loads(res.read().decode())
+        except urllib.error.HTTPError as e:
+            return {"statusCode":502,"headers":{"Access-Control-Allow-Origin":"*"},"body":json.dumps({"error":e.read().decode()})}
+        reply = result["choices"][0]["message"]["content"]
+        return {"statusCode":200,"headers":{"Access-Control-Allow-Origin":"*"},"body":json.dumps({"reply":reply})}
 ```
 
 ---
 
-## 🔄 スクリプト説明
+## 💻 Web UI (web/index.html)
+
+```html
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Wellbeing Chat Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: auto; padding: 1rem; }
+    #chat-log { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: .5rem; margin-bottom: .5rem; }
+    .user   { text-align: right; margin: .25rem; }
+    .assistant { text-align: left; margin: .25rem; }
+    .system { text-align: center; color: #888; margin: .25rem; }
+    #prompt { width: calc(100% - 80px); padding: .5rem; }
+    #send   { width: 60px; padding: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Wellbeing Chat Demo</h1>
+  <div id="chat-log"></div>
+  <div>
+    <input id="prompt" type="text" placeholder="メッセージを入力…" />
+    <button id="send">送信</button>
+  </div>
+  <script src="main.js"></script>
+</body>
+</html>
+```
+
+---
+
+## 🚦 フロントエンド (web/main.js)
+
+```js
+document.addEventListener('DOMContentLoaded', () => {
+  source .env が読み込まれる upload_web.sh で<API_URL>を置換
+  const API = '<API_URL>';
+
+  const systemPrompt = "あなたは優しい健康コーチです。80文字以内の日本語で答えて。";
+  let messages = [{ role: 'system', content: systemPrompt }];
+
+  const logEl = document.getElementById('chat-log');
+  const inputEl = document.getElementById('prompt');
+
+  function renderChat() {
+    logEl.innerHTML = messages.map(m => {
+      const cls = m.role;
+      const icon = m.role === 'user' ? '👤' : m.role === 'assistant' ? '🤖' : '⚙️';
+      return `<div class="${cls}">${icon} ${m.content}</div>`;
+    }).join('');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function send() {
+    const text = inputEl.value.trim(); if (!text) return;
+    messages.push({ role: 'user', content: text }); renderChat(); inputEl.value = '';
+    const resp = await fetch(API, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ messages })
+    });
+    const { reply } = await resp.json();
+    messages.push({ role:'assistant', content:reply }); renderChat();
+  }
+
+  document.getElementById('send').addEventListener('click', send);
+  inputEl.addEventListener('keypress', e => e.key==='Enter' && send());
+  renderChat();
+});
+```
+
+---
+
+## 🔄 デプロイスクリプト
 
 ### scripts/deploy.sh
 
-* CloudFormation デプロイ & `.env` 生成
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+STACK_NAME="wb-demo"
+TEMPLATE_FILE="iac/wb-coach-demo.yml"
+AWS_REGION="ap-northeast-1"
+ENV="demo"
+
+echo "👉 Deploying stack ${STACK_NAME}..."
+aws cloudformation deploy \
+  --template-file "${TEMPLATE_FILE}" \
+  --stack-name "${STACK_NAME}" \
+  --region "${AWS_REGION}" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides Env=${ENV} DeployTime=$(date +%Y%m%d%H%M%S)
+
+echo "👉 Exporting outputs to .env..."
+aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
+  --query "Stacks[0].Outputs[?OutputKey=='WebURL'||OutputKey=='ChatAPI'].[OutputKey,OutputValue]" \
+  --output text | while read KEY VALUE; do
+    case "$KEY" in
+      WebURL)  echo "WEB_URL=${VALUE}" ;;  
+      ChatAPI) echo "API_URL=${VALUE}" ;;  
+    esac
+done > .env
+
+echo "✅ Deployed. WEB_URL=$(grep WEB_URL .env) API_URL=$(grep API_URL .env)"
+```
 
 ### scripts/upload\_web.sh
 
-* Web UI の `main.js` に `API_URL` を埋め込み
-* S3 へ `index.html`/`main.js` を sync
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+source .env
+BUCKET=$(echo "$WEB_URL" | sed -E 's#http://(.*)\.s3-website.*#\1#')
+sed -i.bak "s#<API_URL>#$API_URL#g" web/main.js
+aws s3 sync web/ s3://$BUCKET/ --exclude "*" --include "index.html" --include "main.js"
+mv web/main.js.bak web/main.js
+echo "Web files uploaded to $WEB_URL"
+```
 
-### scripts/delete\_stack.sh
-
-* スタック削除
-
----
-
-## ⚙️ 動作フロー
-
-1. Web UI から `POST $API_URL` を実行
-2. API Gateway → Lambda → OpenAI 呼び出し
-3. 応答を返却
-4. Web UI に表示
-
----
-
-これで他のチームメンバーも **1 リポジトリ + 3 コマンド** で再現可能です！
