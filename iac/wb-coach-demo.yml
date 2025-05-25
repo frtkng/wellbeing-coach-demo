@@ -64,8 +64,44 @@ Resources:
         Variables:
            OPENAI_KEY: "{{resolve:secretsmanager:demo/openai:SecretString:::}}"
       Code:
-        S3Bucket: !Sub wb-${Env}-site-${AWS::AccountId}
-        S3Key:    chat-bundle.zip          
+        ZipFile: |
+         import os, json, urllib.request, urllib.error
+         def lambda_handler(event, context):
+             body = json.loads(event.get("body","{}"))
+             messages = body.get("messages", [])
+             if not messages:
+                 messages = [{
+                     "role":"system",
+                     "content":"あなたは優しい健康コーチです。80文字以内の日本語で答えて。"
+                 }]
+             payload = json.dumps({
+                 "model":"gpt-4o-mini",
+                 "messages":messages
+             }).encode("utf-8")
+             req = urllib.request.Request(
+                 "https://api.openai.com/v1/chat/completions",
+                 data=payload,
+                 headers={
+                     "Content-Type":"application/json",
+                     "Authorization":f"Bearer {os.environ['OPENAI_KEY']}"
+                 },
+                 method="POST"
+             )
+             try:
+                 with urllib.request.urlopen(req, timeout=15) as res:
+                     result = json.loads(res.read().decode())
+             except urllib.error.HTTPError as e:
+                 return {
+                     "statusCode":502,
+                     "headers":{"Access-Control-Allow-Origin":"*"},
+                     "body":json.dumps({"error":e.read().decode()})
+                 }
+             reply = result["choices"][0]["message"]["content"]
+             return {
+                 "statusCode":200,
+                 "headers":{"Access-Control-Allow-Origin":"*"},
+                 "body":json.dumps({"reply":reply})
+             }
 
   # 4) API Gateway (REST)
   Api:

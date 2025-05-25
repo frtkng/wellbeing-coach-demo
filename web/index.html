@@ -1,11 +1,28 @@
-<!DOCTYPE html><html><head><meta charset="utf-8">
-    <title>Wellbeing Chat Demo</title>
-    <style>body{font-family:sans-serif}#log{height:300px;overflow:auto;border:1px solid #ccc;padding:6px}</style>
-    </head><body>
-    <h3>Wellbeing Chat Demo</h3>
-    <div id="log"></div>
-    <input id="msg" style="width:70%" placeholder="メッセージ">
-    <button onclick="send()">Send</button>
-    <script src="main.js"></script>
-    </body></html>
-    
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Wellbeing Chat Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: auto; padding: 1rem; }
+    #chat-log { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: .5rem; margin-bottom: .5rem; }
+    .user   { text-align: right; margin: .25rem; }
+    .assistant { text-align: left; margin: .25rem; }
+    .system { text-align: center; color: #888; margin: .25rem; }
+    #prompt { width: calc(100% - 80px); padding: .5rem; }
+    #send   { width: 60px; padding: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Wellbeing Chat Demo</h1>
+
+  <div id="chat-log"></div>
+  <div>
+    <input id="prompt" type="text" placeholder="メッセージを入力…" />
+    <!-- onclick は消して id="send" のみ残す -->
+    <button id="send">送信</button>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
