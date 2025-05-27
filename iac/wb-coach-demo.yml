@@ -34,6 +34,22 @@ Resources:
             Action: s3:GetObject
             Resource: !Sub "${SiteBucket.Arn}/*"
 
+  ChatLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub wb-${Env}-chat-logs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE  
+
   # 2) Lambda ロール
   LambdaRole:
     Type: AWS::IAM::Role
@@ -47,6 +63,14 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBWrite
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt ChatLogsTable.Arn  
 
   # 3) Chat Lambda
   ChatLambda:
@@ -63,46 +87,77 @@ Resources:
       Environment:
         Variables:
            OPENAI_KEY: "{{resolve:secretsmanager:demo/openai:SecretString:::}}"
+           CHAT_LOGS_TABLE: !Ref ChatLogsTable
       Code:
         ZipFile: |
-         import os, json, urllib.request, urllib.error
-         def lambda_handler(event, context):
-             body = json.loads(event.get("body","{}"))
-             messages = body.get("messages", [])
-             if not messages:
-                 messages = [{
-                     "role":"system",
-                     "content":"あなたは優しい健康コーチです。80文字以内の日本語で答えて。"
-                 }]
-             payload = json.dumps({
-                 "model":"gpt-4o-mini",
-                 "messages":messages
-             }).encode("utf-8")
-             req = urllib.request.Request(
-                 "https://api.openai.com/v1/chat/completions",
-                 data=payload,
-                 headers={
-                     "Content-Type":"application/json",
-                     "Authorization":f"Bearer {os.environ['OPENAI_KEY']}"
-                 },
-                 method="POST"
-             )
-             try:
-                 with urllib.request.urlopen(req, timeout=15) as res:
-                     result = json.loads(res.read().decode())
-             except urllib.error.HTTPError as e:
-                 return {
-                     "statusCode":502,
-                     "headers":{"Access-Control-Allow-Origin":"*"},
-                     "body":json.dumps({"error":e.read().decode()})
-                 }
-             reply = result["choices"][0]["message"]["content"]
-             return {
-                 "statusCode":200,
-                 "headers":{"Access-Control-Allow-Origin":"*"},
-                 "body":json.dumps({"reply":reply})
-             }
+          import os, json, urllib.request, urllib.error, time, boto3
+          dynamodb = boto3.client('dynamodb')
+          TABLE = os.environ['CHAT_LOGS_TABLE']
 
+          def lambda_handler(event, context):
+              # 1) フロントから送られた全メッセージ履歴を取得
+              body = json.loads(event.get("body","{}"))
+              messages = body.get("messages", [])
+              if not messages:
+                  messages = [{
+                      "role":"system",
+                      "content":"あなたは優しい健康コーチです。80文字以内の日本語で答えて。"
+                  }]
+
+              # 2) 直前のユーザ発話だけ抽出
+              user_input = ""
+              for m in reversed(messages):
+                  if m.get("role") == "user":
+                      user_input = m.get("content","")
+                      break
+
+              # 3) OpenAI Chat API 呼び出し
+              payload = json.dumps({
+                  "model":    "gpt-4o-mini",
+                  "messages": messages
+              }).encode("utf-8")
+              req = urllib.request.Request(
+                  "https://api.openai.com/v1/chat/completions",
+                  data=payload,
+                  headers={
+                      "Content-Type":  "application/json",
+                      "Authorization": f"Bearer {os.environ['OPENAI_KEY']}"
+                  },
+                  method="POST"
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as res:
+                      result = json.loads(res.read().decode())
+              except urllib.error.HTTPError as e:
+                  return {
+                      "statusCode": 502,
+                      "headers": {"Access-Control-Allow-Origin":"*"},
+                      "body": json.dumps({"error": e.read().decode()})
+                  }
+
+              reply = result["choices"][0]["message"]["content"]
+
+              # 4) DynamoDB に対話ログを保存（sessionId + timestamp + userInput + reply + full messages）
+              timestamp = int(time.time() * 1000)
+              session_id = (event.get("requestContext", {})
+                                .get("requestId", context.aws_request_id))
+              dynamodb.put_item(
+                  TableName=TABLE,
+                  Item={
+                      "sessionId": {"S": session_id},
+                      "timestamp": {"N": str(timestamp)},
+                      "userInput": {"S": user_input},
+                      "reply":     {"S": reply},
+                      "messages":  {"S": json.dumps(messages)}
+                  }
+              )
+
+              # 5) 応答を返却
+              return {
+                  "statusCode": 200,
+                  "headers": {"Access-Control-Allow-Origin":"*"},
+                  "body": json.dumps({"reply": reply})
+              }
   # 4) API Gateway (REST)
   Api:
     Type: AWS::ApiGateway::RestApi
